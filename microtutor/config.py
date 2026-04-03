@@ -7,9 +7,8 @@ import json
 import os
 import re
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-
 
 SCHEMA_VERSION = 1
 

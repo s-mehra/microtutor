@@ -16,9 +16,9 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
-from textual.widgets import Input, Static, Header
+from textual.widgets import Header, Input, Static
 
-from microtutor.config import ConfigManager, AppConfig
+from microtutor.config import AppConfig, ConfigManager
 from microtutor.course import CourseManager, CourseMeta
 from microtutor.graph import ConceptGraph
 from microtutor.history import LessonHistory, LessonRecord

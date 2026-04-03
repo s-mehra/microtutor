@@ -1,14 +1,10 @@
 """Tests for CourseManager."""
 
 import json
-import tempfile
-from pathlib import Path
 
 import pytest
 
-from microtutor.course import CourseManager, CourseMeta
-from microtutor.graph import ConceptGraph
-from microtutor.model import StudentModel
+from microtutor.course import CourseManager
 
 
 @pytest.fixture

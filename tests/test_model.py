@@ -41,7 +41,6 @@ def test_correct_answer_increases_mastery(simple_graph):
 
 
 def test_incorrect_answer_lower_increase(simple_graph):
-    model = StudentModel(simple_graph)
     # Two models: one gets correct, one gets incorrect
     model_correct = StudentModel(simple_graph)
     model_incorrect = StudentModel(simple_graph)

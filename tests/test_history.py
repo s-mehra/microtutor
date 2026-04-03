@@ -1,7 +1,5 @@
 """Tests for LessonHistory."""
 
-import tempfile
-from pathlib import Path
 
 import pytest
 

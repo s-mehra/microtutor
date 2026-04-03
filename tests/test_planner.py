@@ -11,7 +11,6 @@ from microtutor.model import StudentModel
 from microtutor.planner import (
     MAX_ATTEMPTS_BEFORE_BACKTRACK,
     PREREQ_MASTERY_THRESHOLD,
-    TEACH_MASTERY_THRESHOLD,
     Planner,
 )
 

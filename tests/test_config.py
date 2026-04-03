@@ -1,13 +1,11 @@
 """Tests for ConfigManager."""
 
 import json
-import tempfile
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from microtutor.config import ConfigManager, AppConfig, _slugify
+from microtutor.config import AppConfig, ConfigManager, _slugify
 
 
 @pytest.fixture

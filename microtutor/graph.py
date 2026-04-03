@@ -76,8 +76,6 @@ class ConceptGraph:
             data = json.load(f)
         return cls.from_dict(data)
 
-        return cg
-
     def get_node(self, concept_id: str) -> ConceptNode:
         return self._nodes[concept_id]
 

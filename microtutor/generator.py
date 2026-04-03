@@ -277,6 +277,7 @@ class CourseGenerator:
         )
 
         last_error = None
+        last_error_text = ""
         for attempt in range(max_retries):
             messages = [{"role": "user", "content": prompt}]
 
