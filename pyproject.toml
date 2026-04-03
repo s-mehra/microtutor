@@ -22,5 +22,17 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["microtutor*"]
 
+[project.urls]
+Homepage = "https://github.com/s-mehra/microtutor"
+Repository = "https://github.com/s-mehra/microtutor"
+
 [project.scripts]
 microtutor = "microtutor.cli:main"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]

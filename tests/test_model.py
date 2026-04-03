@@ -120,7 +120,8 @@ def test_schema_version_in_save(simple_graph):
     model.save(path)
     with open(path) as f:
         data = json.load(f)
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
+    assert "last_updated_at" in data["states"]["a"]
 
 
 def test_observation_log(simple_graph):

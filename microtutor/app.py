@@ -18,7 +18,10 @@ from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.widgets import Input, Static, Header
 
+from microtutor.config import ConfigManager, AppConfig
+from microtutor.course import CourseManager, CourseMeta
 from microtutor.graph import ConceptGraph
+from microtutor.history import LessonHistory, LessonRecord
 from microtutor.model import StudentModel
 from microtutor.planner import Planner
 from microtutor.tutor import Tutor
@@ -74,13 +77,13 @@ class MicrotutorApp(App):
         Binding("escape", "save_quit", "Save & Quit"),
     ]
 
-    def __init__(self, graph_path: Path, students_dir: Path) -> None:
+    def __init__(self, config: ConfigManager) -> None:
         super().__init__()
-        self.graph_path = graph_path
-        self.students_dir = students_dir
+        self.config = config
+        self.app_config: AppConfig | None = None
+        self.course_manager: CourseManager | None = None
         self.graph: ConceptGraph | None = None
         self.model: StudentModel | None = None
-        self.student_path: Path | None = None
         self._input_event = asyncio.Event()
         self._input_value = ""
         self._typewriting = False
@@ -129,8 +132,11 @@ class MicrotutorApp(App):
         self._save_and_quit()
 
     def _save_and_quit(self) -> None:
-        if self.model and self.student_path:
-            self.model.save(self.student_path)
+        if self.model and self.course_manager:
+            self.course_manager.save_student(self.model)
+            if self.graph:
+                meta = self.course_manager.load_meta()
+                self.course_manager.update_meta_stats(meta, self.model, self.graph)
         self.exit()
 
     # --- Widget helpers ---
@@ -339,10 +345,7 @@ class MicrotutorApp(App):
             self._error(str(e))
 
     async def _session_flow(self) -> None:
-        # Load graph
-        self.graph = ConceptGraph.from_json(self.graph_path)
-
-        # Welcome
+        # Welcome banner
         self._write(Panel(
             Text.assemble(
                 ("microtutor", "bold bright_cyan"), "\n",
@@ -352,31 +355,55 @@ class MicrotutorApp(App):
             padding=(1, 3),
         ))
 
-        # Get name
-        self._info("What's your name?")
-        name = await self._ask()
-        if name is None:
-            self._save_and_quit()
+        # Check for updates (non-blocking)
+        try:
+            from microtutor.updates import check_for_update, update_message
+            new_version = await asyncio.to_thread(check_for_update)
+            if new_version:
+                self._write(Panel(
+                    Text(update_message(new_version), style="yellow"),
+                    border_style="yellow",
+                    padding=(0, 2),
+                ))
+        except Exception:
+            pass
+
+        # Onboarding or load config
+        if not self.config.exists():
+            if not await self._onboard():
+                return
+        self.app_config = self.config.load()
+
+        # Resolve API key
+        api_key = self.config.get_api_key()
+        if not api_key:
+            self._error("No API key found. Set ANTHROPIC_API_KEY or re-run onboarding.")
             return
 
-        # Load or create student
-        self.students_dir.mkdir(parents=True, exist_ok=True)
-        self.student_path = self.students_dir / f"{name}.json"
-        self.model = StudentModel(self.graph)
+        self._info(f"Welcome back, {self.app_config.name}.")
 
-        returning = self.student_path.exists()
-        if returning:
-            self.model.load(self.student_path)
+        # Course menu
+        course_dir = await self._course_menu()
+        if course_dir is None:
+            return
 
-        self._write(Panel(
-            Text.assemble(
-                ("microtutor", "bold bright_cyan"), "\n",
-                ("Welcome back, " if returning else "Nice to meet you, ", "white"),
-                (f"{name}.", "white"),
-            ),
-            border_style="bright_cyan",
-            padding=(1, 3),
-        ))
+        # Load course
+        self.course_manager = CourseManager(course_dir)
+        meta = self.course_manager.load_meta()
+        self.graph = self.course_manager.load_graph()
+        self.model = self.course_manager.load_student(self.graph)
+
+        self._info(f"Course: {meta.title}")
+
+        # Show last lesson context on resume
+        history = LessonHistory(self.course_manager.lessons_path)
+        last_lesson = history.get_last_lesson()
+        if last_lesson:
+            self._info(
+                f"Last session: {last_lesson.concept_name} "
+                f"(mastery: {last_lesson.mastery_after:.0%})"
+            )
+
         self._write_mastery()
 
         # Lesson loop
@@ -409,11 +436,189 @@ class MicrotutorApp(App):
             if not cont:
                 return
 
+            # Save progress after each lesson
+            self.course_manager.save_student(self.model)
+            self.course_manager.update_meta_stats(meta, self.model, self.graph)
+
             self._info("Press Enter to continue, or type 'exit' to stop.")
             choice = await self._ask(allow_empty=True)
             if choice is None:
                 self._save_and_quit()
                 return
+
+    async def _onboard(self) -> bool:
+        """First-time setup. Returns True if successful."""
+        self._info("First time here. Let's get you set up.")
+
+        self._info("What's your name?")
+        name = await self._ask()
+        if name is None:
+            return False
+
+        self._info("Enter your Anthropic API key (get one at console.anthropic.com):")
+        while True:
+            key = await self._ask()
+            if key is None:
+                return False
+
+            self._info("Validating API key...")
+            valid = await asyncio.to_thread(self.config.validate_api_key, key)
+            if valid:
+                break
+            self._error("Invalid API key. Please try again.")
+
+        import time as _time
+        app_config = AppConfig(
+            name=name,
+            api_key=key,
+            created_at=_time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        )
+        self.config.save(app_config)
+        self._info("Setup complete.")
+        return True
+
+    async def _course_menu(self) -> Path | None:
+        """Show course menu. Returns selected course directory, or None to quit."""
+        courses = self.config.list_courses()
+
+        if not courses:
+            return await self._create_new_course()
+
+        # Build course table
+        table = Table(
+            title="Your Courses",
+            title_style="bold white",
+            show_edge=False,
+            padding=(0, 1),
+            expand=True,
+        )
+        table.add_column("#", style="bright_cyan", width=3)
+        table.add_column("Course", style="white", ratio=4)
+        table.add_column("Progress", justify="right", ratio=2)
+        table.add_column("Last Studied", justify="right", ratio=2)
+
+        for i, course in enumerate(courses, 1):
+            pct = f"{course.progress_pct:.0%}"
+            progress = f"{course.concepts_mastered}/{course.total_concepts} ({pct})"
+            last = _format_relative_time(course.last_session_at) if course.last_session_at else "never"
+            table.add_row(str(i), course.title, progress, last)
+
+        self._write(table)
+        self._info("")
+        self._info("Enter a number to continue a course, 'new' to start a new one, or 'exit' to quit.")
+
+        while True:
+            choice = await self._ask()
+            if choice is None:
+                return None
+
+            if choice.lower() in ("new", "n"):
+                return await self._create_new_course()
+
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(courses):
+                    return self.config.get_course_dir(courses[idx].slug)
+            except ValueError:
+                pass
+
+            self._info(f"Enter a number 1-{len(courses)}, 'new', or 'exit'.")
+
+    async def _create_new_course(self) -> Path | None:
+        """Create a new course via goal conversation and graph generation."""
+        from microtutor.generator import CourseGenerator, GoalBrief
+
+        api_key = self.config.get_api_key()
+        generator = CourseGenerator(api_key)
+
+        self._info("Let's build a course for you. I'll ask a few questions about what you want to learn.")
+        self._info("(This uses Claude Opus for the best results.)")
+        self._info("")
+
+        # Goal conversation (6-10 turns diagnostic)
+        try:
+            result = await asyncio.to_thread(generator.get_next_message, None)
+        except Exception as e:
+            self._error(f"Could not start course generation: {e}")
+            self._info("Try the demo course instead, or check your API key has Opus access.")
+            return None
+
+        while isinstance(result, str):
+            self._tutor_says(result)
+            answer = await self._ask()
+            if answer is None:
+                return None
+            try:
+                result = await asyncio.to_thread(generator.get_next_message, answer)
+            except Exception as e:
+                self._error(f"Conversation error: {e}")
+                return None
+
+        # result is now a GoalBrief
+        brief: GoalBrief = result
+
+        self._info(f"Great. Generating your course: {brief.course_title}")
+        self._info("This may take a moment...")
+
+        # Generate graph
+        try:
+            graph_data = await asyncio.to_thread(generator.generate_graph, brief)
+        except Exception as e:
+            self._error(f"Graph generation failed: {e}")
+            return None
+
+        # Validate
+        try:
+            graph = generator.validate_graph(graph_data)
+        except ValueError as e:
+            self._error(f"Generated graph is invalid: {e}. Retrying...")
+            try:
+                graph_data = await asyncio.to_thread(generator.generate_graph, brief)
+                graph = generator.validate_graph(graph_data)
+            except Exception as e2:
+                self._error(f"Retry failed: {e2}")
+                return None
+
+        # Show preview
+        concept_count = len(graph.get_all_concept_ids())
+        self._info(f"Generated {concept_count} concepts:")
+        preview_table = Table(show_header=False, show_edge=False, padding=(0, 1), expand=True)
+        preview_table.add_column("Concept", style="bright_cyan", ratio=3)
+        preview_table.add_column("Topics", style="dim", ratio=5)
+        for cid in graph.get_all_concept_ids():
+            node = graph.get_node(cid)
+            topics = ", ".join(node.key_topics[:3])
+            if len(node.key_topics) > 3:
+                topics += f" (+{len(node.key_topics) - 3} more)"
+            preview_table.add_row(node.name, topics or "-")
+        self._write(preview_table)
+
+        self._info("Start this course? (yes/no)")
+        confirm = await self._ask()
+        if confirm is None or confirm.lower() in ("no", "n"):
+            self._info("Course cancelled.")
+            return None
+
+        # Save everything
+        course_dir = self.config.create_course_dir(brief.course_title)
+        generator.save_graph(graph_data, course_dir / "graph.json")
+
+        meta = CourseMeta(
+            title=brief.course_title,
+            slug=course_dir.name,
+            description=brief.course_description,
+            goals=brief.goals,
+            background=brief.background,
+            desired_depth=brief.desired_depth,
+            goal_conversation=brief.conversation,
+            created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            last_session_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            total_concepts=concept_count,
+        )
+        CourseManager(course_dir).save_meta(meta)
+        (course_dir / "lessons.jsonl").touch()
+
+        return course_dir
 
     async def _run_lesson(
         self, concept_id: str, planner: Planner, model: StudentModel, tutor: Tutor,
@@ -423,6 +628,10 @@ class MicrotutorApp(App):
         node = self.graph.get_node(concept_id)
         prereqs = self.graph.get_prerequisites(concept_id)
         lesson_start = time.time()
+
+        # Inject lesson history context
+        history = LessonHistory(self.course_manager.lessons_path)
+        context.lesson_history_context = history.build_context_injection()
 
         # Lesson header
         title = node.lesson_title or node.description
@@ -439,20 +648,20 @@ class MicrotutorApp(App):
                 )
             except Exception as e:
                 self._error(str(e))
-                model.save(self.student_path)
+                self.course_manager.save_student(model)
                 return False
 
             self._tutor_says(question)
             answer = await self._ask()
             if answer is None:
-                model.save(self.student_path)
+                self.course_manager.save_student(model)
                 return False
 
             try:
                 result = await self._call(tutor.evaluate_response, prereq_node.name, answer)
             except Exception as e:
                 self._error(str(e))
-                model.save(self.student_path)
+                self.course_manager.save_student(model)
                 return False
 
             model.partial_update(weakest, result["understood"])
@@ -466,7 +675,7 @@ class MicrotutorApp(App):
         self._tutor_says("Any questions before we get into it?")
         pre_q = await self._ask()
         if pre_q is None:
-            model.save(self.student_path)
+            self.course_manager.save_student(model)
             return False
 
         if pre_q.lower() not in ("no", "n", "none", "nope", ""):
@@ -477,7 +686,7 @@ class MicrotutorApp(App):
                 tutor.record_response(text, context)
             except Exception as e:
                 self._error(str(e))
-                model.save(self.student_path)
+                self.course_manager.save_student(model)
                 return False
 
         # Teaching phase (streaming)
@@ -486,13 +695,13 @@ class MicrotutorApp(App):
             tutor.record_response(text, context)
         except Exception as e:
             self._error(str(e))
-            model.save(self.student_path)
+            self.course_manager.save_student(model)
             return False
 
         while True:
             answer = await self._ask()
             if answer is None:
-                model.save(self.student_path)
+                self.course_manager.save_student(model)
                 return False
 
             if answer.lower() in ("ready", "done", "next", "move on"):
@@ -505,7 +714,7 @@ class MicrotutorApp(App):
                 tutor.record_response(text, context)
             except Exception as e:
                 self._error(str(e))
-                model.save(self.student_path)
+                self.course_manager.save_student(model)
                 return False
 
         # Mid-lesson understanding eval
@@ -523,25 +732,27 @@ class MicrotutorApp(App):
             question = await self._call(tutor.ask_assessment_question, context)
         except Exception as e:
             self._error(str(e))
-            model.save(self.student_path)
+            self.course_manager.save_student(model)
             return False
 
+        assessment_results = []
         for _ in range(4):
             self._tutor_says(question)
             answer = await self._ask()
             if answer is None:
-                model.save(self.student_path)
+                self.course_manager.save_student(model)
                 return False
 
             try:
                 result = await self._call(tutor.judge_answer, context, answer)
             except Exception as e:
                 self._error(str(e))
-                model.save(self.student_path)
+                self.course_manager.save_student(model)
                 return False
 
             model.update(concept_id, result["correct"])
             self._write_assessment(result)
+            assessment_results.append(result)
 
             confidence = result.get("confidence", "clear_pass" if result["correct"] else "clear_fail")
             if confidence != "uncertain":
@@ -551,13 +762,49 @@ class MicrotutorApp(App):
                 question = await self._call(tutor.ask_followup_question, context)
             except Exception as e:
                 self._error(str(e))
-                model.save(self.student_path)
+                self.course_manager.save_student(model)
                 return False
 
         # Lesson summary
         new_mastery = model.predict_mastery(concept_id)
         duration = time.time() - lesson_start
-        model.save(self.student_path)
+        self.course_manager.save_student(model)
+
+        # Record lesson history
+        lesson_summary_data = {"summary": "", "examples_used": [], "key_topics_covered": [], "conversation_digest": ""}
+        try:
+            lesson_summary_data = await self._call(tutor.summarize_lesson, node.name)
+        except Exception:
+            pass  # Non-critical, don't block
+
+        history = LessonHistory(self.course_manager.lessons_path)
+        record = LessonRecord(
+            concept_id=concept_id,
+            concept_name=node.name,
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(lesson_start)),
+            ended_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            duration_seconds=duration,
+            mastery_before=context.student_mastery,
+            mastery_after=new_mastery,
+            key_topics_covered=lesson_summary_data.get("key_topics_covered", []),
+            examples_used=lesson_summary_data.get("examples_used", []),
+            summary=lesson_summary_data.get("summary", ""),
+            conversation_digest=lesson_summary_data.get("conversation_digest", ""),
+        )
+        history.append(record)
+
+        # Save lesson as readable markdown note
+        self.course_manager.save_note(
+            concept_id=concept_id,
+            concept_name=node.name,
+            lesson_title=node.lesson_title or node.description,
+            conversation=tutor.conversation_history,
+            summary_data=lesson_summary_data,
+            assessment_results=assessment_results,
+            mastery_before=context.student_mastery,
+            mastery_after=new_mastery,
+            duration_seconds=duration,
+        )
 
         next_concept = planner.select_next_concept()
         next_name = None
@@ -571,6 +818,33 @@ class MicrotutorApp(App):
         self._write_mastery()
 
         return True
+
+
+def _format_relative_time(iso_str: str) -> str:
+    """Format an ISO timestamp as a relative time string."""
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        delta = now - dt
+        days = delta.days
+        if days == 0:
+            hours = delta.seconds // 3600
+            if hours == 0:
+                return "just now"
+            return f"{hours}h ago"
+        elif days == 1:
+            return "yesterday"
+        elif days < 7:
+            return f"{days} days ago"
+        elif days < 30:
+            weeks = days // 7
+            return f"{weeks} week{'s' if weeks > 1 else ''} ago"
+        else:
+            months = days // 30
+            return f"{months} month{'s' if months > 1 else ''} ago"
+    except Exception:
+        return iso_str
 
 
 def _split_prose_and_code(text: str) -> list[tuple[str, str]]:

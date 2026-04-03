@@ -35,6 +35,8 @@ DESCRIPTION: {description}
 {curriculum_context}
 {prereq_context}
 {hints_context}
+{key_topics_context}
+{lesson_history_context}
 {attempt_context}
 
 TEACHING APPROACH:
@@ -159,6 +161,42 @@ in the result. Ask ONE more question that probes a different angle of the same \
 concept. Don't repeat the same type of question. Just ask it directly.
 """
 
+SUMMARIZE_LESSON_PROMPT = """\
+Summarize the tutoring lesson that just happened on "{concept_name}". \
+Review the conversation and extract key information for future reference. \
+Use the record_lesson_summary tool.
+"""
+
+SUMMARIZE_TOOL = {
+    "name": "record_lesson_summary",
+    "description": "Record a structured summary of a completed lesson.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": "2-3 sentence summary of what was taught and how the student performed.",
+            },
+            "examples_used": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of specific examples or analogies used during the lesson.",
+            },
+            "key_topics_covered": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Which key topics from the concept were actually covered.",
+            },
+            "conversation_digest": {
+                "type": "string",
+                "description": "Brief digest of the conversation flow for context in future lessons.",
+            },
+        },
+        "required": ["summary", "examples_used", "key_topics_covered", "conversation_digest"],
+        "additionalProperties": False,
+    },
+}
+
 
 class Tutor:
     """Manages teaching conversations and assessments via Claude API."""
@@ -222,12 +260,25 @@ class Tutor:
                 "checking and reinforcing their understanding."
             )
 
+        key_topics_context = ""
+        if context.key_topics:
+            key_topics_context = (
+                "KEY TOPICS TO COVER IN THIS LESSON:\n"
+                + "\n".join(f"  - {t}" for t in context.key_topics)
+                + "\nCover all key topics before moving to assessment. "
+                "The assessment should verify the student understands each key topic."
+            )
+
+        lesson_history_context = context.lesson_history_context or ""
+
         return TEACH_SYSTEM_PROMPT.format(
             concept_name=context.concept_name,
             description=context.description,
             curriculum_context=context.curriculum_overview,
             prereq_context=prereq_context,
             hints_context=hints_context,
+            key_topics_context=key_topics_context,
+            lesson_history_context=lesson_history_context,
             attempt_context=attempt_context,
         )
 
@@ -441,3 +492,31 @@ class Tutor:
         question_text = response.content[0].text
         self._append_exchange("Go on.", question_text)
         return question_text
+
+    def summarize_lesson(self, concept_name: str) -> dict:
+        """Summarize the lesson that just completed using the conversation history.
+
+        Returns dict with: summary, examples_used, key_topics_covered, conversation_digest.
+        """
+        system = SUMMARIZE_LESSON_PROMPT.format(concept_name=concept_name)
+        messages = self._get_active_history()
+
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=400,
+            system=system,
+            messages=messages,
+            tools=[SUMMARIZE_TOOL],
+            tool_choice={"type": "tool", "name": "record_lesson_summary"},
+        )
+
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "record_lesson_summary":
+                return block.input
+
+        return {
+            "summary": "",
+            "examples_used": [],
+            "key_topics_covered": [],
+            "conversation_digest": "",
+        }

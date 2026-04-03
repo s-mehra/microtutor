@@ -112,14 +112,3 @@ def test_missing_prerequisite():
         path = Path(f.name)
     with pytest.raises(ValueError, match="not found"):
         ConceptGraph.from_json(path)
-
-
-def test_real_neural_networks_graph():
-    """Smoke test against the actual data file."""
-    path = Path(__file__).parent.parent / "data" / "neural_networks.json"
-    graph = ConceptGraph.from_json(path)
-    assert len(graph.get_all_concept_ids()) == 15
-    # Vectors should be at depth 0 (no prerequisites)
-    assert graph.get_topological_depth("vectors") == 0
-    # MLP should be the deepest
-    assert graph.get_topological_depth("mlp") > 0

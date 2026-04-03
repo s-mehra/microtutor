@@ -9,13 +9,14 @@ from pathlib import Path
 
 from microtutor.graph import ConceptGraph
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass
 class ConceptState:
     mastery: float  # P(L_n) - probability the student has learned the concept
     attempts: int = 0
+    last_updated_at: float = 0.0  # unix timestamp of last mastery change
 
 
 class StudentModel:
@@ -62,7 +63,6 @@ class StudentModel:
             p_l_given_obs = (p_l * (1 - p_slip)) / p_correct
         else:
             p_incorrect = 1 - p_correct
-            # Guard against division by zero (shouldn't happen with valid params)
             if p_incorrect < 1e-10:
                 p_l_given_obs = p_l
             else:
@@ -71,11 +71,11 @@ class StudentModel:
         # Learning transition: P(L_{n+1})
         new_mastery = p_l_given_obs + (1 - p_l_given_obs) * p_learn
 
-        # Clamp to [0, 1] to handle floating point edge cases
+        # Clamp to [0, 1]
         state.mastery = max(0.0, min(1.0, new_mastery))
         state.attempts += 1
+        state.last_updated_at = time.time()
 
-        # Log observation for future parameter fitting
         self._observation_log.append({
             "concept_id": concept_id,
             "correct": correct,
@@ -87,22 +87,17 @@ class StudentModel:
         return new_mastery
 
     def partial_update(self, concept_id: str, understood: bool) -> float:
-        """Softer mastery update for mid-lesson signals (premise checks, understanding checks).
-
-        Uses a reduced learning rate to move mastery less aggressively than a
-        full assessment update.
-        """
+        """Softer mastery update for mid-lesson signals."""
         state = self.states[concept_id]
         p_l = state.mastery
 
         if understood:
-            # Gentle boost: move 30% of the way toward confident
             new_mastery = p_l + (1 - p_l) * 0.05
         else:
-            # Gentle reduction: move 30% of the way toward uncertain
             new_mastery = p_l * 0.9
 
         state.mastery = max(0.0, min(1.0, new_mastery))
+        state.last_updated_at = time.time()
 
         self._observation_log.append({
             "concept_id": concept_id,
@@ -123,7 +118,11 @@ class StudentModel:
         data = {
             "schema_version": SCHEMA_VERSION,
             "states": {
-                cid: {"mastery": s.mastery, "attempts": s.attempts}
+                cid: {
+                    "mastery": s.mastery,
+                    "attempts": s.attempts,
+                    "last_updated_at": s.last_updated_at,
+                }
                 for cid, s in self.states.items()
             },
             "observation_log": self._observation_log,
@@ -135,20 +134,20 @@ class StudentModel:
     def load(self, path: str | Path) -> None:
         path = Path(path)
         if not path.exists():
-            return  # Fresh student, keep initial state
+            return
 
         with open(path) as f:
             data = json.load(f)
 
         version = data.get("schema_version", 0)
         if version != SCHEMA_VERSION:
-            # Future: run migration functions here
             return
 
         for cid, state_data in data.get("states", {}).items():
             if cid in self.states:
                 self.states[cid].mastery = state_data["mastery"]
                 self.states[cid].attempts = state_data["attempts"]
+                self.states[cid].last_updated_at = state_data.get("last_updated_at", 0.0)
 
         self._observation_log = data.get("observation_log", [])
 

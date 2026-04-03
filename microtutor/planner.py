@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from microtutor.graph import ConceptGraph
 from microtutor.model import StudentModel
@@ -24,6 +24,8 @@ class TeachingContext:
     attempt_number: int
     is_backtrack: bool = False
     curriculum_overview: str = ""  # full syllabus with mastery status
+    key_topics: list[str] = field(default_factory=list)
+    lesson_history_context: str = ""
 
 
 class Planner:
@@ -162,4 +164,5 @@ class Planner:
             attempt_number=attempts + 1,
             is_backtrack=is_backtrack,
             curriculum_overview=curriculum_overview,
+            key_topics=node.key_topics,
         )

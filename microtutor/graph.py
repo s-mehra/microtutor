@@ -16,6 +16,7 @@ class ConceptNode:
     description: str
     lesson_title: str = ""
     teaching_hints: list[str] = field(default_factory=list)
+    key_topics: list[str] = field(default_factory=list)
     bkt_params: dict[str, float] = field(default_factory=lambda: {
         "p_init": 0.05,
         "p_learn": 0.1,
@@ -32,11 +33,8 @@ class ConceptGraph:
         self._nodes: dict[str, ConceptNode] = {}
 
     @classmethod
-    def from_json(cls, path: str | Path) -> ConceptGraph:
-        path = Path(path)
-        with open(path) as f:
-            data = json.load(f)
-
+    def from_dict(cls, data: dict) -> ConceptGraph:
+        """Build a ConceptGraph from a dictionary (same shape as the JSON file)."""
         cg = cls()
 
         for node_data in data["concepts"]:
@@ -46,6 +44,7 @@ class ConceptGraph:
                 description=node_data["description"],
                 lesson_title=node_data.get("lesson_title", ""),
                 teaching_hints=node_data.get("teaching_hints", []),
+                key_topics=node_data.get("key_topics", []),
                 bkt_params=node_data.get("bkt_params", {
                     "p_init": 0.05,
                     "p_learn": 0.1,
@@ -67,6 +66,15 @@ class ConceptGraph:
 
         if not nx.is_directed_acyclic_graph(cg.graph):
             raise ValueError("Concept graph contains cycles")
+
+        return cg
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> ConceptGraph:
+        path = Path(path)
+        with open(path) as f:
+            data = json.load(f)
+        return cls.from_dict(data)
 
         return cg
 
