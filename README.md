@@ -1,6 +1,9 @@
-# about
+# About
 I love to teach. I even have dreams of opening up a brick and mortar school when I'm older. However I've been thinking increasingly of what education is going to look like in an AI driven world. Models and applications can already give you all the information in the world. But there are few systems that can understand your goals, why you want to learn, constantly track your progress, and adapt to your understanding. This is my attempt at building an AI tutor, who helps you learn AND understand anything you want at a deep level from the ground up
 
+This is currently an early version, just a opencode / claude code style terminal application, but this will be an ever evolving project that I will continue to maintain and improve. Always trying to make how the tutor designs curriculums, the way students can interact, and how the lessons are taught better than before. The goal isn't to have a complex application, but instead and effective and seamless learning experience. 
+
+I welcome all feedback and [contributions](CONTRIBUTING.md).
 
 # microtutor
 
