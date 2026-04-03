@@ -202,7 +202,7 @@ class Tutor:
     """Manages teaching conversations and assessments via Claude API."""
 
     def __init__(self) -> None:
-        self.client = anthropic.Anthropic()
+        self.client = anthropic.Anthropic(max_retries=8)
         self.model = os.environ.get("MICROTUTOR_MODEL", DEFAULT_MODEL)
         self.conversation_history: list[dict] = []
         self._summary: str = ""

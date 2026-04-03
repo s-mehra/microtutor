@@ -209,7 +209,7 @@ class CourseGenerator:
     """Runs the goal-setting conversation and generates the knowledge graph."""
 
     def __init__(self, api_key: str) -> None:
-        self.client = anthropic.Anthropic(api_key=api_key)
+        self.client = anthropic.Anthropic(api_key=api_key, max_retries=8)
         self.conversation: list[dict] = []
 
     def get_next_message(self, student_message: str | None = None) -> str | GoalBrief:

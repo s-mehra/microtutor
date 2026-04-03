@@ -182,10 +182,10 @@ class MicrotutorApp(App):
         self._add(Static(Markdown(text), classes="tutor-msg"))
 
     async def _stream_tutor(self, stream_method, *args) -> str:
-        """Buffer API response in a thread, then typewriter it."""
-        self._tutor_label()
+        """Buffer API response in a thread (with retry), then typewriter it."""
+        accumulated = await self._call_with_retry(self._buffer_stream, stream_method, *args)
 
-        accumulated = await asyncio.to_thread(self._buffer_stream, stream_method, *args)
+        self._tutor_label()
 
         segments = _split_prose_and_code(accumulated)
         for seg_type, content in segments:
@@ -262,6 +262,41 @@ class MicrotutorApp(App):
 
     async def _call(self, fn, *args, **kwargs):
         return await asyncio.to_thread(fn, *args, **kwargs)
+
+    async def _call_with_retry(self, fn, *args, **kwargs):
+        """Call a function with UI-level retry on transient API errors."""
+        import anthropic as _anthropic
+
+        while True:
+            try:
+                return await asyncio.to_thread(fn, *args, **kwargs)
+            except _anthropic.APIStatusError as e:
+                if e.status_code in (429, 500, 502, 503, 529):
+                    name = self.app_config.name if self.app_config else "there"
+                    self._tutor_label()
+                    self._add(Static(Markdown(
+                        f"That's a great question {name}. Unfortunately there's a "
+                        f"server issue preventing me from getting that information "
+                        f"for you. Sorry about that. If you give me a few seconds, "
+                        f"I'll be able to answer if you ask me again."
+                    ), classes="tutor-msg"))
+                    choice = await self._ask(allow_empty=True)
+                    if choice is None:
+                        raise
+                    continue
+                raise
+            except _anthropic.APIConnectionError:
+                name = self.app_config.name if self.app_config else "there"
+                self._tutor_label()
+                self._add(Static(Markdown(
+                    f"That's a great question {name}. Unfortunately I'm having "
+                    f"trouble connecting right now. Sorry about that. If you give "
+                    f"me a few seconds, I'll be able to answer if you ask me again."
+                ), classes="tutor-msg"))
+                choice = await self._ask(allow_empty=True)
+                if choice is None:
+                    raise
+                continue
 
     # --- Mastery display ---
 
@@ -642,28 +677,17 @@ class MicrotutorApp(App):
             weakest = min(prereqs, key=lambda p: model.predict_mastery(p))
             prereq_node = self.graph.get_node(weakest)
 
-            try:
-                question = await self._call(
-                    tutor.check_premise, prereq_node.name, prereq_node.description
-                )
-            except Exception as e:
-                self._error(str(e))
-                self.course_manager.save_student(model)
-                return False
-
+            question = await self._call_with_retry(
+                tutor.check_premise, prereq_node.name, prereq_node.description
+            )
             self._tutor_says(question)
+
             answer = await self._ask()
             if answer is None:
                 self.course_manager.save_student(model)
                 return False
 
-            try:
-                result = await self._call(tutor.evaluate_response, prereq_node.name, answer)
-            except Exception as e:
-                self._error(str(e))
-                self.course_manager.save_student(model)
-                return False
-
+            result = await self._call_with_retry(tutor.evaluate_response, prereq_node.name, answer)
             model.partial_update(weakest, result["understood"])
             if result["understood"]:
                 self._info(f"Good. {result['note']}")
@@ -679,24 +703,12 @@ class MicrotutorApp(App):
             return False
 
         if pre_q.lower() not in ("no", "n", "none", "nope", ""):
-            try:
-                text = await self._stream_tutor(
-                    tutor.continue_teaching_stream, context, pre_q
-                )
-                tutor.record_response(text, context)
-            except Exception as e:
-                self._error(str(e))
-                self.course_manager.save_student(model)
-                return False
+            text = await self._stream_tutor(tutor.continue_teaching_stream, context, pre_q)
+            tutor.record_response(text, context)
 
         # Teaching phase (streaming)
-        try:
-            text = await self._stream_tutor(tutor.start_teaching_stream, context)
-            tutor.record_response(text, context)
-        except Exception as e:
-            self._error(str(e))
-            self.course_manager.save_student(model)
-            return False
+        text = await self._stream_tutor(tutor.start_teaching_stream, context)
+        tutor.record_response(text, context)
 
         while True:
             answer = await self._ask()
@@ -707,19 +719,12 @@ class MicrotutorApp(App):
             if answer.lower() in ("ready", "done", "next", "move on"):
                 break
 
-            try:
-                text = await self._stream_tutor(
-                    tutor.continue_teaching_stream, context, answer
-                )
-                tutor.record_response(text, context)
-            except Exception as e:
-                self._error(str(e))
-                self.course_manager.save_student(model)
-                return False
+            text = await self._stream_tutor(tutor.continue_teaching_stream, context, answer)
+            tutor.record_response(text, context)
 
         # Mid-lesson understanding eval
         try:
-            mid_result = await self._call(
+            mid_result = await self._call_with_retry(
                 tutor.evaluate_response, context.concept_name,
                 "Based on the conversation so far, does this student seem to understand the concept?",
             )
@@ -728,12 +733,7 @@ class MicrotutorApp(App):
             pass
 
         # Assessment (adaptive)
-        try:
-            question = await self._call(tutor.ask_assessment_question, context)
-        except Exception as e:
-            self._error(str(e))
-            self.course_manager.save_student(model)
-            return False
+        question = await self._call_with_retry(tutor.ask_assessment_question, context)
 
         assessment_results = []
         for _ in range(4):
@@ -743,13 +743,7 @@ class MicrotutorApp(App):
                 self.course_manager.save_student(model)
                 return False
 
-            try:
-                result = await self._call(tutor.judge_answer, context, answer)
-            except Exception as e:
-                self._error(str(e))
-                self.course_manager.save_student(model)
-                return False
-
+            result = await self._call_with_retry(tutor.judge_answer, context, answer)
             model.update(concept_id, result["correct"])
             self._write_assessment(result)
             assessment_results.append(result)
@@ -758,12 +752,7 @@ class MicrotutorApp(App):
             if confidence != "uncertain":
                 break
 
-            try:
-                question = await self._call(tutor.ask_followup_question, context)
-            except Exception as e:
-                self._error(str(e))
-                self.course_manager.save_student(model)
-                return False
+            question = await self._call_with_retry(tutor.ask_followup_question, context)
 
         # Lesson summary
         new_mastery = model.predict_mastery(concept_id)
@@ -773,7 +762,7 @@ class MicrotutorApp(App):
         # Record lesson history
         lesson_summary_data = {"summary": "", "examples_used": [], "key_topics_covered": [], "conversation_digest": ""}
         try:
-            lesson_summary_data = await self._call(tutor.summarize_lesson, node.name)
+            lesson_summary_data = await self._call_with_retry(tutor.summarize_lesson, node.name)
         except Exception:
             pass  # Non-critical, don't block
 
