@@ -1,6 +1,8 @@
-# microtutor
-
+# about
 I love to teach. I even have dreams of opening up a brick and mortar school when I'm older. However I've been thinking increasingly of what education is going to look like in an AI driven world. Models and applications can already give you all the information in the world. But there are few systems that can understand your goals, why you want to learn, constantly track your progress, and adapt to your understanding. This is my attempt at building an AI tutor, who helps you learn AND understand anything you want at a deep level from the ground up
+
+
+# microtutor
 
 A knowledge-state aware AI tutor that remembers what you know, tracks what you struggle with, and sequences material accordingly.
 
