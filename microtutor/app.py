@@ -89,12 +89,15 @@ class MicrotutorApp(App):
         self._typewriting = False
         self._skip_typewriter = False
         self._waiting_for_input = False
+        # Visualization
+        self._progress_server = None
+        self._emitter = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         yield VerticalScroll(id="conversation")
         yield Input(
-            placeholder="Type here... (type 'exit' to save and close)",
+            placeholder="Type here... (exit to save  |  /progress to view knowledge graph)",
             id="user-input",
         )
 
@@ -104,10 +107,18 @@ class MicrotutorApp(App):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         value = event.value.strip()
 
-        # Exit always works, regardless of state
+        # Slash commands always work, regardless of state
         if value.lower() in ("quit", "exit", "q"):
             event.input.clear()
             self._save_and_quit()
+            return
+
+        if value == "/progress":
+            event.input.clear()
+            if self.graph and self.model:
+                self._launch_progress_view()
+            else:
+                self._info("Enter a course first to view your knowledge graph.")
             return
 
         if not self._waiting_for_input:
@@ -137,6 +148,8 @@ class MicrotutorApp(App):
             if self.graph:
                 meta = self.course_manager.load_meta()
                 self.course_manager.update_meta_stats(meta, self.model, self.graph)
+        if self._progress_server:
+            self._progress_server.stop()
         self.exit()
 
     # --- Widget helpers ---
@@ -259,6 +272,42 @@ class MicrotutorApp(App):
             ))
 
     # --- API call wrapper ---
+
+    def _emit_viz(self, current_concept: str | None = None) -> None:
+        """Push a state snapshot to the progress server (if running)."""
+        if not self._progress_server or not self._progress_server.is_running():
+            return
+        if not self._emitter or not self.model or not self.graph:
+            return
+        title = ""
+        if self.course_manager:
+            try:
+                title = self.course_manager.load_meta().title
+            except Exception:
+                pass
+        snapshot = self._emitter.build_snapshot(self.model, self.graph, current_concept, title)
+        self._progress_server.update_state(snapshot)
+
+    def _launch_progress_view(self) -> None:
+        """Start the progress server and open the 3D graph in the browser."""
+        from microtutor.state_emitter import StateEmitter
+        from microtutor.viz_server import ProgressServer
+
+        if self._emitter is None:
+            self._emitter = StateEmitter()
+
+        if self._progress_server is None:
+            self._progress_server = ProgressServer()
+
+        if not self._progress_server.is_running():
+            port = self._progress_server.start()
+            self._info(f"Knowledge graph opened at http://127.0.0.1:{port}")
+        else:
+            self._info("Refreshing knowledge graph...")
+
+        # Push current state
+        self._emit_viz()
+        self._progress_server.open_browser()
 
     async def _call(self, fn, *args, **kwargs):
         return await asyncio.to_thread(fn, *args, **kwargs)
@@ -671,6 +720,7 @@ class MicrotutorApp(App):
         # Lesson header
         title = node.lesson_title or node.description
         self._write_lesson_header(node.name, title, context.student_mastery)
+        self._emit_viz(concept_id)
 
         # Premise check
         if prereqs:
@@ -689,6 +739,7 @@ class MicrotutorApp(App):
 
             result = await self._call_with_retry(tutor.evaluate_response, prereq_node.name, answer)
             model.partial_update(weakest, result["understood"])
+            self._emit_viz(concept_id)
             if result["understood"]:
                 self._info(f"Good. {result['note']}")
             else:
@@ -729,6 +780,7 @@ class MicrotutorApp(App):
                 "Based on the conversation so far, does this student seem to understand the concept?",
             )
             model.partial_update(concept_id, mid_result["understood"])
+            self._emit_viz(concept_id)
         except Exception:
             pass
 
@@ -745,6 +797,7 @@ class MicrotutorApp(App):
 
             result = await self._call_with_retry(tutor.judge_answer, context, answer)
             model.update(concept_id, result["correct"])
+            self._emit_viz(concept_id)
             self._write_assessment(result)
             assessment_results.append(result)
 
